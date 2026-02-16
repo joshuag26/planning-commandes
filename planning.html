@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Planning commandes</title>
+  <style>
+    :root { --bd:#e7e7e7; --txt:#111; --mut:#666; }
+    body { font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial; margin:0; background:#fafafa; color:var(--txt); }
+    .wrap { max-width: 820px; margin: 0 auto; padding: 16px; }
+    .card { background:#fff; border:1px solid var(--bd); border-radius: 18px; padding: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.04); }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .row > * { flex: 1 1 auto; }
+    h1 { font-size: 18px; margin:0 0 10px; }
+    .small { font-size: 12px; color:var(--mut); line-height: 1.3; }
+    input, select, button {
+      border:1px solid var(--bd); border-radius: 14px; padding: 12px; background:#fff; font-size: 14px;
+    }
+    button { cursor:pointer; }
+    button.primary { background:#111; color:#fff; border-color:#111; }
+    button.danger { background:#fff; color:#b00020; border-color:#f1c3cc; }
+    .grid { display:flex; gap:10px; flex-wrap:wrap; margin-top: 12px; }
+    .pill {
+      padding: 10px 12px; border-radius: 14px; border:1px solid var(--bd);
+      background:#fff; user-select:none; cursor:pointer; display:flex; align-items:center;
+      min-width: 180px;
+    }
+    .pill.done { background:#f1fff3; border-color:#bfe8c5; }
+    .stats { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-top: 10px; }
+    .kpi { border:1px solid var(--bd); border-radius: 16px; padding: 12px; background:#fff; }
+    .kpi .v { font-size: 18px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .hr { height:1px; background:var(--bd); margin: 12px 0; }
+    .footer { display:flex; gap:10px; flex-wrap:wrap; margin-top: 12px; }
+    .hint { margin-top: 8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Planning commandes </h1>
+
+      <div class="row">
+        <input id="csvFile" type="file" accept=".csv,text/csv" />
+        <button class="primary" id="btnLoad">Importer CSV</button>
+        <button class="danger" id="btnReset">Reset</button>
+      </div>
+
+
+      <div class="hr"></div>
+
+      <div class="row">
+        <label class="small" style="flex:0 0 auto;">Fin de période</label>
+        <input id="endDate" type="date" />
+        <div class="small" style="flex:2 1 220px;">
+          Par défaut : dernier jour du mois en cours. Tu peux le changer si besoin.
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
+        <label class="small" style="flex:0 0 auto;">Jours non travaillés</label>
+        <select id="offDays" multiple size="7" style="flex:1 1 220px;">
+          <option value="0" selected>Dimanche</option>
+          <option value="1">Lundi</option>
+          <option value="2">Mardi</option>
+          <option value="3">Mercredi</option>
+          <option value="4">Jeudi</option>
+          <option value="5">Vendredi</option>
+          <option value="6">Samedi</option>
+        </select>
+        <div class="small" style="flex:2 1 220px;">
+          Dimanche est coché par défaut. Tu peux ajouter d’autres jours si tu veux.
+        </div>
+      </div>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="hr"></div>
+
+      <div class="small">Commandes (tape pour cocher / décocher)</div>
+      <div class="grid" id="orders"></div>
+
+      <div class="footer">
+  <button id="btnAllDone">Tout cocher</button>
+  <button id="btnAllUndone">Tout décocher</button>
+</div>
+
+
+    </div>
+  </div>
+
+<script>
+/** ---------- stockage ---------- **/
+const STORE_KEY = "planning_commandes_v1";
+const loadStore = () => {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); }
+  catch { return {}; }
+};
+const saveStore = (obj) => localStorage.setItem(STORE_KEY, JSON.stringify(obj));
+
+/** ---------- utils dates ---------- **/
+function todayISO(){
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0,10);
+}
+function parseISO(s){
+  const [y,m,d] = s.split("-").map(Number);
+  return new Date(y, m-1, d);
+}
+function clampDate(d){
+  const x = new Date(d);
+  x.setHours(0,0,0,0);
+  return x;
+}
+function workingDaysRemaining(startISO, endISO, offDaySet){
+  if(!startISO || !endISO) return 0;
+  let start = clampDate(parseISO(startISO));
+  let end = clampDate(parseISO(endISO));
+  if(end < start) return 0;
+  let count = 0;
+  for(let d = new Date(start); d <= end; d.setDate(d.getDate()+1)){
+    const dow = d.getDay(); // 0=dim
+    if(!offDaySet.has(String(dow))) count++;
+  }
+  return count;
+}
+function lastDayOfCurrentMonthISO(){
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const d = new Date(y, m + 1, 0); // dernier jour du mois courant
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0,10);
+}
+
+/** Parse date CSV -> timestamp (supporte JJ/MM/AAAA et AAAA-MM-JJ) **/
+function parseCSVDateToTs(s){
+  const t = (s || "").trim();
+  if(!t) return Number.POSITIVE_INFINITY;
+
+  // JJ/MM/AAAA
+  const m1 = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if(m1){
+    const dd = Number(m1[1]), mm = Number(m1[2]), yy = Number(m1[3]);
+    const d = new Date(yy, mm-1, dd);
+    d.setHours(0,0,0,0);
+    return d.getTime();
+  }
+
+  // AAAA-MM-JJ
+  const m2 = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if(m2){
+    const yy = Number(m2[1]), mm = Number(m2[2]), dd = Number(m2[3]);
+    const d = new Date(yy, mm-1, dd);
+    d.setHours(0,0,0,0);
+    return d.getTime();
+  }
+
+  // fallback (si format bizarre)
+  const d = new Date(t);
+  const ts = d.getTime();
+  return Number.isFinite(ts) ? ts : Number.POSITIVE_INFINITY;
+}
+
+/** ---------- parser CSV (gère quotes) ---------- **/
+function parseCSV(text){
+  const rows = [];
+  let i=0, field="", row=[], inQuotes=false;
+  while(i < text.length){
+    const c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i+=2; continue; }
+        inQuotes = false; i++; continue;
+      } else { field += c; i++; continue; }
+    } else {
+      if(c === '"'){ inQuotes = true; i++; continue; }
+      if(c === ','){ row.push(field); field=""; i++; continue; }
+      if(c === '\n'){ row.push(field); rows.push(row); row=[]; field=""; i++; continue; }
+      if(c === '\r'){ i++; continue; }
+      field += c; i++; continue;
+    }
+  }
+  row.push(field);
+  rows.push(row);
+  return rows.filter(r => r.some(x => (x||"").trim() !== ""));
+}
+
+function fileSignature(text){
+  const t = text || "";
+  return `${t.length}:${t.slice(0,40)}:${t.slice(-40)}`;
+}
+
+/** ---------- app state ---------- **/
+let store = loadStore();
+let orders = []; // {id, name, qty, firstDateTs}
+let doneSet = new Set(store.doneIds || []);
+let currentFileSignature = store.fileSig || null;
+
+function readOffDays(){
+  const sel = document.getElementById("offDays");
+  const set = new Set();
+  for(const opt of sel.options){
+    if(opt.selected) set.add(opt.value);
+  }
+  return set;
+}
+
+function applyStoreToUI(){
+  document.getElementById("endDate").value = store.endDate || lastDayOfCurrentMonthISO();
+
+  const sel = document.getElementById("offDays");
+  const saved = new Set(store.offDays || ["0"]);
+  for(const opt of sel.options) opt.selected = saved.has(opt.value);
+}
+
+function persist(){
+  store.doneIds = Array.from(doneSet);
+  store.endDate = document.getElementById("endDate").value;
+  store.offDays = Array.from(readOffDays());
+  store.fileSig = currentFileSignature;
+  store.orders = orders;
+  saveStore(store);
+}
+
+function compute(){
+  const off = readOffDays();
+  const endISO = document.getElementById("endDate").value;
+
+  const total = orders.reduce((s,o)=>s+o.qty,0);
+  const doneQty = orders.filter(o=>doneSet.has(o.id)).reduce((s,o)=>s+o.qty,0);
+  const remaining = Math.max(0, total - doneQty);
+
+  const workdays = workingDaysRemaining(todayISO(), endISO, off);
+  const perDay = workdays > 0 ? Math.ceil(remaining / workdays) : remaining;
+
+  const stats = document.getElementById("stats");
+  stats.innerHTML = `
+    <div class="kpi"><div class="small">Total articles (mois)</div><div class="v">${total}</div></div>
+    <div class="kpi"><div class="small">Fait (articles)</div><div class="v">${doneQty}</div></div>
+    <div class="kpi"><div class="small">Reste (articles)</div><div class="v">${remaining}</div></div>
+    <div class="kpi"><div class="small">À faire / jour (jours restants: ${workdays})</div><div class="v">${perDay}</div></div>
+  `;
+}
+
+function escapeHtml(s){
+  return (s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+}
+
+function render(){
+  const box = document.getElementById("orders");
+  box.innerHTML = "";
+  for(const o of orders){
+    const div = document.createElement("div");
+    div.className = "pill" + (doneSet.has(o.id) ? " done" : "");
+    // Affichage: Nom + quantité à droite
+    div.innerHTML = `<span>${escapeHtml(o.name)}</span><span class="small" style="margin-left:auto;">${o.qty}</span>`;
+
+    div.onclick = () => {
+      if(doneSet.has(o.id)) doneSet.delete(o.id);
+      else doneSet.add(o.id);
+      persist();
+      render();
+      compute();
+    };
+    box.appendChild(div);
+  }
+}
+
+/** ---------- import CSV : regroupe par NOM, somme Quantité, tri par date (ancien -> récent) ---------- **/
+async function importCSV(file){
+  const text = await file.text();
+  const sig = fileSignature(text);
+  const rows = parseCSV(text);
+  if(rows.length < 2) { alert("CSV vide ou illisible."); return; }
+
+  const headers = rows[0].map(h => (h||"").trim());
+  const H = headers.map(h => h.toLowerCase().trim());
+
+  const idxNom = H.indexOf("nom");
+  let idxQty = H.indexOf("quantité");
+  if(idxQty === -1) idxQty = H.indexOf("quantite");
+
+  if(idxNom === -1 || idxQty === -1){
+    alert("Colonnes attendues: Nom, Quantité.");
+    return;
+  }
+
+  let lastNom = "";
+
+  const byName = new Map(); 
+  let appearanceIndex = 0;
+
+  for(let r=1; r<rows.length; r++){
+    const line = rows[r];
+
+    let n = (line[idxNom] || "").trim();
+    if(n) lastNom = n;
+    else n = lastNom;
+
+    if(!n) continue;
+
+    let qtyRaw = (line[idxQty] || "").toString().trim().replace(",", ".");
+    let q = Number(qtyRaw);
+    if(!Number.isFinite(q)) q = 1;
+    q = Math.max(0, Math.round(q));
+
+    const key = n.toLowerCase();
+
+    if(!byName.has(key)){
+      byName.set(key, { 
+        id: key, 
+        name: n, 
+        qty: 0,
+        firstIndex: appearanceIndex++
+      });
+    }
+
+    byName.get(key).qty += q;
+  }
+
+  if(currentFileSignature && currentFileSignature !== sig){
+    const doReset = confirm("Nouveau CSV détecté. Reset des coches ?\nOK = reset | Annuler = garder les coches si possible");
+    if(doReset) doneSet = new Set();
+  }
+
+  // 🔥 TRI SELON ORDRE D’APPARITION DANS LE CSV
+  orders = Array.from(byName.values())
+  .sort((a,b) => a.firstIndex - b.firstIndex)
+  .reverse();
+
+
+  currentFileSignature = sig;
+
+  doneSet = new Set([...doneSet].filter(id => orders.some(o => o.id === id)));
+
+  persist();
+  render();
+  compute();
+}
+
+
+/** ---------- boutons ---------- **/
+document.getElementById("btnLoad").onclick = async () => {
+  const f = document.getElementById("csvFile").files[0];
+  if(!f) { alert("Choisis un CSV."); return; }
+  await importCSV(f);
+};
+
+document.getElementById("btnReset").onclick = () => {
+  if(!confirm("Tout effacer (CSV + coches + réglages) ?")) return;
+  localStorage.removeItem(STORE_KEY);
+  store = {};
+  orders = [];
+  doneSet = new Set();
+  currentFileSignature = null;
+  applyStoreToUI();
+  persist();
+  render();
+  compute();
+};
+
+document.getElementById("btnAllDone").onclick = () => {
+  orders.forEach(o => doneSet.add(o.id));
+  persist(); render(); compute();
+};
+document.getElementById("btnAllUndone").onclick = () => {
+  doneSet = new Set();
+  persist(); render(); compute();
+};
+
+document.getElementById("endDate").onchange = () => { persist(); compute(); };
+document.getElementById("offDays").onchange = () => { persist(); compute(); };
+
+
+
+/** init **/
+(function init(){
+  applyStoreToUI();
+  orders = store.orders || [];
+  doneSet = new Set(store.doneIds || []);
+  currentFileSignature = store.fileSig || null;
+  render();
+  compute();
+})();
+</script>
+</body>
+</html>
